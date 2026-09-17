@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from eventflow.dispatcher.consumer import Consumer, ConsumerMessage
-from eventflow.dispatcher.retry_tracker import RedisRetryTracker
+from eventflow.dispatcher.retry_tracker import RetryTracker
 from eventflow.emitter.emitter import EventEmitter
 from eventflow.emitter.producer import MessageConfig
 from eventflow.util.partition import get_partition
@@ -57,7 +57,7 @@ class EventDispatcher:
         partition_count: int,
         event_emitter: EventEmitter,
         consumer: Consumer,
-        retry_tracker: RedisRetryTracker,
+        retry_tracker: RetryTracker,
     ):
         self.partition_count = partition_count
         

@@ -1,14 +1,14 @@
-from pkg.infra.db import AsyncRedisClient
+from eventflow.cache.cache import CacheProvider
 
 
 # 重试计数器: 记录每个事件消费失败后的重试次数
-class RedisRetryTracker:
+class RetryTracker:
     def __init__(
         self,
-        redis: AsyncRedisClient,
+        cache: CacheProvider,
         expire_seconds: int = 86400,
     ):
-        self.redis = redis
+        self.cache = cache
         self.expire_seconds = expire_seconds
 
     def _key(self, topic: str, partition: int, offset: int) -> str:
@@ -16,18 +16,18 @@ class RedisRetryTracker:
 
     async def get(self, topic: str, partition: int, offset: int) -> int:
         key = self._key(topic, partition, offset)
-        count = await self.redis.client.get(key)
+        count = await self.cache.get(key)
         if count is None:
             return 0
         return int(count)
 
     async def incr(self, topic: str, partition: int, offset: int) -> int:
         key = self._key(topic, partition, offset)
-        count = await self.redis.client.incr(key)
+        count = await self.cache.incr(key)
         if count == 1:
-            await self.redis.client.expire(key, self.expire_seconds)
+            await self.cache.expire(key, self.expire_seconds)
         return count
 
     async def clear(self, topic: str, partition: int, offset: int):
         key = self._key(topic, partition, offset)
-        await self.redis.client.delete(key)
+        await self.cache.delete(key)
