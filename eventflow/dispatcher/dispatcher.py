@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from eventflow.dispatcher.consumer import Consumer, ConsumerMessage
-from eventflow.dispatcher.redis_retry_tracker import RedisRetryTracker
+from eventflow.dispatcher.retry_tracker import RedisRetryTracker
 from eventflow.emitter.emitter import EventEmitter
 from eventflow.emitter.producer import MessageConfig
 from eventflow.util.partition import get_partition
