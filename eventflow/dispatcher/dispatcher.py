@@ -2,7 +2,6 @@ import asyncio
 import logging
 import json
 import signal
-from collections import defaultdict
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from enum import StrEnum
@@ -125,8 +124,6 @@ class EventDispatcher:
             topics = self.topics.copy()
             if self.retry_topic:
                 topics.append(self.retry_topic)
-            if self.dlq_topic:
-                topics.append(self.dlq_topic)
             self.consumer.set_topics(topics)
         if self.on_assign_callback():
             self.consumer.register_on_assign(self.on_assign_callback())
@@ -219,77 +216,6 @@ class EventDispatcher:
         except Exception:
             logger.exception("dispatch failed")
 
-    async def _process_strict_results(self, results: list[ConsumeResult]):
-        """
-        trict mode:
-        - partition级别严格顺序
-        - partition独立seek
-        - partition独立commit
-        - retry count存在redis里面，因为strict mode下，消费失败的消息不会存到retry topic中，只能等待原topic的重复消费
-        """
-        partition_results: dict[tuple[str, int], list[ConsumeResult]] = defaultdict(list)
-
-        # 按 topic+partition 分组
-        for result in results:
-            key = (result.msg.topic, result.msg.partition)
-            partition_results[key].append(result)
-
-        commit_msgs = []
-        seek_partitions = []
-
-        for _, partition_batch in partition_results.items():
-            # partition内按offset排序
-            partition_batch.sort(key=lambda r: r.msg.offset)
-            for result in partition_batch:
-                msg = result.msg
-                if result.success:
-                    await self.retry_tracker.clear(msg.topic, msg.partition, msg.offset)
-                    commit_msgs.append(msg)
-                    continue
-
-                retry_count = await self.retry_tracker.incr(msg.topic, msg.partition, msg.offset)
-
-                logger.error(
-                    f"strict consume failed "
-                    f"retry={retry_count} "
-                    f"topic={msg.topic} "
-                    f"partition={msg.partition} "
-                    f"offset={msg.offset}"
-                    f"msg={msg}"
-                )
-
-                # 超过重试次数
-                if retry_count >= self.max_retries:
-                    await self._send_to_dlq(msg, result.error, retry_count)
-                    await self.retry_tracker.clear(msg.topic, msg.partition, msg.offset)
-                    # DLQ后允许推进offset
-                    commit_msgs.append(msg)
-                    continue
-
-                # 未达到最大重试次数
-                seek_partitions.append(msg)
-
-                # 当前partition停止继续处理
-                break
-
-        # commit成功消息
-        if commit_msgs:
-            await self.consumer.store_offsets(commit_msgs)
-            await self.consumer.commit()
-            logger.debug(f"{self.__class__.__name__} _process_strict_results, commit msgs count: {len(commit_msgs)}")
-
-        # seek失败partition
-        await asyncio.gather(*[self._retry_partition(msg) for msg in seek_partitions])
-        if len(seek_partitions) > 0:
-            logger.debug(f"{self.__class__.__name__} _process_strict_results, seek partitions count: {len(seek_partitions)}")
-
-    async def _retry_partition(self, msg: ConsumerMessage):
-        await self.consumer.pause_partition(msg)
-        retry_count = await self.retry_tracker.get(msg.topic, msg.partition, msg.offset)
-        await asyncio.sleep(min(2 ** retry_count, 30))
-        await self.consumer.seek(msg)
-        await self.consumer.resume_partition(msg)
-
     async def _process_normal_results(self, results: list[ConsumeResult]):
         """
         normal mode:
@@ -328,9 +254,10 @@ class EventDispatcher:
 
     def build_message_config(self, payload: dict, msg: ConsumerMessage) -> MessageConfig:
         partition_key = self.get_partition_key(payload, msg)
-        partition = None
         if partition_key is not None:
             partition = get_partition(partition_key, self.partition_count)
+        else:
+            partition = msg.partition
         return MessageConfig(partition=partition)
 
     async def _send_to_retry(self, msg: ConsumerMessage, exc: Exception, retry_count: int):

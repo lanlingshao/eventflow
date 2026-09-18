@@ -17,7 +17,7 @@ KafkaProducerConf = {
 
     "request.timeout.ms": 30000,
 
-    "client.id": "quant-aio-producer",
+    "client.id": "test-producer",
 
     'reconnect.backoff.ms': 1000,
     'reconnect.backoff.max.ms': 10000,

@@ -1,8 +1,10 @@
 import asyncio
+import json
 import logging
 
 from eventflow.broker.kafka.consumer import KafkaConsumer
 from eventflow.broker.kafka.producer import KafkaProducer
+from eventflow.dispatcher.consumer import ConsumerMessage
 from eventflow.dispatcher.dispatcher import EventDispatcher, ConsumeResult
 from eventflow.dispatcher.retry_tracker import RetryTracker
 from eventflow.emitter.emitter import EventEmitter
@@ -34,8 +36,10 @@ class NormalDispatcher(EventDispatcher):
         return results
 
     async def _handler_message(self, msg):
-        payload = msg.payload.decode()
+        payload = self._get_business_payload(msg)
         logger.debug(f"consume message: {msg} payload:{payload}")
+        if payload['event_id'] == 1:
+            raise Exception("test error")
 
 
 async def main():
