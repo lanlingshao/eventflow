@@ -257,6 +257,7 @@ class EventDispatcher:
         if partition_key is not None:
             partition = get_partition(partition_key, self.partition_count)
         else:
+            # retry topic、dlq topic 保持原分区路由
             partition = msg.partition
         return MessageConfig(partition=partition)
 

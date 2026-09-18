@@ -4,7 +4,6 @@ import logging
 
 from eventflow.broker.kafka.consumer import KafkaConsumer
 from eventflow.broker.kafka.producer import KafkaProducer
-from eventflow.dispatcher.consumer import ConsumerMessage
 from eventflow.dispatcher.dispatcher import EventDispatcher, ConsumeResult
 from eventflow.dispatcher.retry_tracker import RetryTracker
 from eventflow.emitter.emitter import EventEmitter
@@ -20,6 +19,11 @@ logger = logging.getLogger("dispatcher")
 
 
 class NormalDispatcher(EventDispatcher):
+    """
+    普通消费模式，不保证严格顺序消费
+
+    创建的TOPIC、DLQ_TOPIC、RETRY_TOPIC的分区数必须与PARTITION_COUNT一致
+    """
     topics = [TOPIC]
     dlq_topic = DLQ_TOPIC
     retry_topic = RETRY_TOPIC
