@@ -25,11 +25,11 @@ KafkaProducerConf = {
 
 KafkaConsumerConf = {
     "bootstrap.servers": "127.0.0.1:9092",
-    "group.id": "quant-market-consumer",
+    "group.id": "test-consumer",
 
     "enable.auto.commit": False,
     "enable.auto.offset.store": False,
-    "auto.offset.reset": "latest",
+    "auto.offset.reset": "earliest",
 
     'partition.assignment.strategy': 'cooperative-sticky',
 

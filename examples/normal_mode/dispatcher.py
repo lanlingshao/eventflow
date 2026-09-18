@@ -34,7 +34,8 @@ class NormalDispatcher(EventDispatcher):
         return results
 
     async def _handler_message(self, msg):
-        logger.debug(f"consume message: {msg}")
+        payload = msg.payload.decode()
+        logger.debug(f"consume message: {msg} payload:{payload}")
 
 
 async def main():
