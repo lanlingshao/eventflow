@@ -1,14 +1,17 @@
 from eventflow.cache.cache import CacheProvider
+from eventflow.cache.local_cache import LocalCache
 
 
 # 重试计数器: 记录每个事件消费失败后的重试次数
 class RetryTracker:
     def __init__(
         self,
-        cache: CacheProvider,
+        cache: CacheProvider = None,
         expire_seconds: int = 86400,
     ):
         self.cache = cache
+        if self.cache is None:
+            self.cache = LocalCache()
         self.expire_seconds = expire_seconds
 
     def _key(self, topic: str, partition: int, offset: int) -> str:
