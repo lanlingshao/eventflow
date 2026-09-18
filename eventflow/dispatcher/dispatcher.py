@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Coroutine
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Callable
 
 from eventflow.dispatcher.consumer import Consumer, ConsumerMessage
 from eventflow.dispatcher.retry_tracker import RetryTracker
@@ -28,8 +29,6 @@ class ConsumeResult:
     error: Exception | None = None
 
 
-# TODO
-#  1、子类的_batch_handler_message方法增加幂等性的操作，
 class EventDispatcher:
     """
     支持：
@@ -71,9 +70,6 @@ class EventDispatcher:
 
         self._stop_event = asyncio.Event()
 
-        # 单条 handler 并发限制
-        # self._semaphore = asyncio.Semaphore(self.concurrency)
-
         # EventDispatcher的子类必须实现_handler_message或_batch_handler_message方法
         self._validate_handlers()
 
@@ -82,8 +78,7 @@ class EventDispatcher:
         # 约束子类为STRICT_ORDER模式时，必须设置dlq_topic属性，严格顺序消费模式不放入重试队列
         super().__init_subclass__(**kwargs)
         if cls.consume_mode == ConsumeMode.STRICT_ORDER:
-            if not cls.dlq_topic:
-                raise TypeError(f"{cls.__name__} must define dlq_topic when using STRICT mode")
+            raise TypeError(f"STRICT_ORDER mode is not supported yet")
         elif cls.consume_mode == ConsumeMode.NORMAL:
             if not cls.retry_topic:
                 raise TypeError(f"{cls.__name__} must define retry_topic when using NORMAL mode")
@@ -216,14 +211,9 @@ class EventDispatcher:
         try:
             await self.before_batch_handler(msgs)
             results = await self._batch_handler_message(msgs)
-            # TODO 目前股票预警系统的worker允许过程中，无法将消息无法发送retry topic和dlq topic中，所以暂时注释掉，后续fix了再开启
             await self.after_batch_handler(results)
-            '''
-            if self.consume_mode == ConsumeMode.STRICT_ORDER:
-                await self._process_strict_results(results)
-            else:
+            if self.consume_mode == ConsumeMode.NORMAL:
                 await self._process_normal_results(results)
-            '''
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -348,7 +338,7 @@ class EventDispatcher:
             logger.error("retry topic not configured")
             return
 
-        origin_payload = self.get_business_payload(msg)
+        origin_payload = self._get_business_payload(msg)
         payload = {
             "meta": {
                 "origin_topic": msg.topic,
@@ -375,7 +365,7 @@ class EventDispatcher:
         if not self.dlq_topic:
             logger.error("dlq topic not configured")
             return
-        origin_payload = self.get_business_payload(msg)
+        origin_payload = self._get_business_payload(msg)
         payload = {
             "meta": {
                 "origin_topic": msg.topic,
@@ -396,7 +386,8 @@ class EventDispatcher:
 
         logger.error(f"message sent to dlq topic={self.dlq_topic} payload={payload}")
 
-    def get_business_payload(self, msg: ConsumerMessage) -> dict:
+    @staticmethod
+    def _get_business_payload(msg: ConsumerMessage) -> dict:
         payload = msg.decoded_payload or {}
         # retry/dlq envelope
         if "payload" in payload:
@@ -404,7 +395,8 @@ class EventDispatcher:
         # normal message
         return payload
 
-    def _get_normal_retry_count(self, msg: ConsumerMessage) -> int:
+    @staticmethod
+    def _get_normal_retry_count(msg: ConsumerMessage) -> int:
         payload = msg.decoded_payload or {}
         meta = payload.get("meta", {})
         return int(meta.get("retry_count", 0))
@@ -457,11 +449,14 @@ class EventDispatcher:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-    def on_assign_callback(self):
-        return None
+    def on_assign_callback(self) -> Callable:
+        # implement by subclass
+        pass
 
-    def on_revoke_callback(self):
-        return None
+    def on_revoke_callback(self) -> Callable:
+        # implement by subclass
+        pass
 
-    def on_lost_callback(self):
-        return None
+    def on_lost_callback(self) -> Callable:
+        # implement by subclass
+        pass
