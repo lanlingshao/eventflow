@@ -8,7 +8,6 @@ from enum import StrEnum
 from typing import Callable
 
 from eventflow.dispatcher.consumer import Consumer, ConsumerMessage
-from eventflow.dispatcher.retry_tracker import RetryTracker
 from eventflow.emitter.emitter import EventEmitter
 from eventflow.emitter.producer import MessageConfig
 from eventflow.util.partition import get_partition
@@ -45,8 +44,6 @@ class EventDispatcher:
     shutdown_timeout = 10  # 超时时间（秒）
     max_retries = 3 # 最大重试次数
 
-    consume_mode = ConsumeMode.NORMAL
-
     retry_topic: str | None = None # 重试 topic
     dlq_topic: str | None = None # 死信队列 topic
 
@@ -55,13 +52,11 @@ class EventDispatcher:
         partition_count: int,
         event_emitter: EventEmitter,
         consumer: Consumer,
-        retry_tracker: RetryTracker,
     ):
         self.partition_count = partition_count
         
         self.event_emitter = event_emitter
         self.consumer = consumer
-        self.retry_tracker = retry_tracker
 
         # 任务集合，先这样搞，后期如果需要，可以考虑使用basana项目的basana/core/helpers.py里面的TaskPool
         self._tasks: set[asyncio.Task] = set()
@@ -72,19 +67,19 @@ class EventDispatcher:
         # EventDispatcher的子类必须实现_handler_message或_batch_handler_message方法
         self._validate_handlers()
 
-    def __init_subclass__(cls, **kwargs):
-        # 约束子类为NORMAL模式时，必须设置retry_topic、dlq_topic属性
-        # 约束子类为STRICT_ORDER模式时，必须设置dlq_topic属性，严格顺序消费模式不放入重试队列
-        super().__init_subclass__(**kwargs)
-        if cls.consume_mode == ConsumeMode.STRICT_ORDER:
-            raise TypeError(f"STRICT_ORDER mode is not supported yet")
-        elif cls.consume_mode == ConsumeMode.NORMAL:
-            if not cls.retry_topic:
-                raise TypeError(f"{cls.__name__} must define retry_topic when using NORMAL mode")
-            if not cls.dlq_topic:
-                raise TypeError(f"{cls.__name__} must define dlq_topic when using NORMAL mode")
-        else:
-            raise ValueError(f"consume_mode: {cls.consume_mode} is not supported")
+    # def __init_subclass__(cls, **kwargs):
+    #     # 约束子类为NORMAL模式时，必须设置retry_topic、dlq_topic属性
+    #     # 约束子类为STRICT_ORDER模式时，必须设置dlq_topic属性，严格顺序消费模式不放入重试队列
+    #     super().__init_subclass__(**kwargs)
+    #     if cls.consume_mode == ConsumeMode.STRICT_ORDER:
+    #         raise TypeError(f"STRICT_ORDER mode is not supported yet")
+    #     elif cls.consume_mode == ConsumeMode.NORMAL:
+    #         if not cls.retry_topic:
+    #             raise TypeError(f"{cls.__name__} must define retry_topic when using NORMAL mode")
+    #         if not cls.dlq_topic:
+    #             raise TypeError(f"{cls.__name__} must define dlq_topic when using NORMAL mode")
+    #     else:
+    #         raise ValueError(f"consume_mode: {cls.consume_mode} is not supported")
 
     def _validate_handlers(self):
         # 检查子类是否实现了_batch_handler_message方法
@@ -209,8 +204,8 @@ class EventDispatcher:
             await self.before_batch_handler(msgs)
             results = await self._batch_handler_message(msgs)
             await self.after_batch_handler(results)
-            if self.consume_mode == ConsumeMode.NORMAL:
-                await self._process_normal_results(results)
+            # if self.consume_mode == ConsumeMode.NORMAL:
+            await self._process_normal_results(results)
         except asyncio.CancelledError:
             raise
         except Exception:

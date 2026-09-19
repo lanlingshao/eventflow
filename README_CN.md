@@ -93,7 +93,6 @@ class OrderDispatcher(EventDispatcher):
 ```python
 from eventflow.broker.kafka.consumer import KafkaConsumer
 from eventflow.broker.kafka.producer import KafkaProducer
-from eventflow.dispatcher.retry_tracker import RetryTracker
 from eventflow.emitter.emitter import EventEmitter
 
 producer = KafkaProducer(producer_config)
@@ -104,7 +103,6 @@ dispatcher = OrderDispatcher(
     partition_count=24,
     event_emitter=emitter,
     consumer=consumer,
-    retry_tracker=RetryTracker(),
 )
 await dispatcher.run()
 ```

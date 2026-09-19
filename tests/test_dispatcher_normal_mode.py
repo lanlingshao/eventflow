@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, Mock
 
 from eventflow.dispatcher.consumer import ConsumerMessage
 from eventflow.dispatcher.dispatcher import ConsumeResult, EventDispatcher
-from eventflow.dispatcher.retry_tracker import RetryTracker
 from eventflow.emitter.emitter import EventEmitter
 from eventflow.util.partition import get_partition
 
@@ -96,7 +95,6 @@ class NormalModeDispatcherTests(unittest.IsolatedAsyncioTestCase):
             partition_count=8,
             event_emitter=EventEmitter(self.producer),
             consumer=self.consumer,
-            retry_tracker=RetryTracker(),
         )
         dispatcher.results = []
         return dispatcher

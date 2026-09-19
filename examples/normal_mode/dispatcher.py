@@ -1,11 +1,9 @@
 import asyncio
-import json
 import logging
 
 from eventflow.broker.kafka.consumer import KafkaConsumer
 from eventflow.broker.kafka.producer import KafkaProducer
 from eventflow.dispatcher.dispatcher import EventDispatcher, ConsumeResult
-from eventflow.dispatcher.retry_tracker import RetryTracker
 from eventflow.emitter.emitter import EventEmitter
 from examples.normal_mode.conf import KafkaProducerConf, KafkaConsumerConf
 from examples.normal_mode.constant import TOPIC, DLQ_TOPIC, RETRY_TOPIC, PARTITION_COUNT
@@ -50,12 +48,10 @@ async def main():
     producer = KafkaProducer(KafkaProducerConf)
     emitter = EventEmitter(producer)
     consumer = KafkaConsumer(KafkaConsumerConf)
-    retry_tracker = RetryTracker()
 
     worker = NormalDispatcher(
         event_emitter=emitter,
         consumer=consumer,
-        retry_tracker=retry_tracker,
         partition_count=PARTITION_COUNT,
     )
     await worker.run()
