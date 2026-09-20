@@ -4,20 +4,16 @@ import json
 import signal
 from collections.abc import Coroutine
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Callable
 
 from eventflow.dispatcher.consumer import Consumer, ConsumerMessage
+from eventflow.dispatcher.failure import FailureContext, FailureAction, FailureDecision, FailureHandlingStrategy, \
+    NoopFailureStrategy
 from eventflow.emitter.emitter import EventEmitter
 from eventflow.emitter.producer import MessageConfig
 from eventflow.util.partition import get_partition
 
 logger = logging.getLogger(__name__)
-
-
-class ConsumeMode(StrEnum):
-    STRICT_ORDER = "strict_order"
-    NORMAL = "normal"
 
 
 @dataclass
@@ -33,30 +29,31 @@ class EventDispatcher:
     - 支持批量消息处理，不支持单条消费（减小消费失败处理等复杂度）
     - graceful shutdown
     - background tasks
-    - 严格模式、普通模式：严格模式保证批量消费的顺序，适用于CDC/Binlog同步、金融转账、撮合/行情增量流、库存系统等场景
 
     子类：
     - 需要实现 _batch_handler_message（真正批量）
     """
 
-    topics: list[str] = []
-
     shutdown_timeout = 10  # 超时时间（秒）
-    max_retries = 3 # 最大重试次数
-
-    retry_topic: str | None = None # 重试 topic
-    dlq_topic: str | None = None # 死信队列 topic
 
     def __init__(
         self,
-        partition_count: int,
         event_emitter: EventEmitter,
         consumer: Consumer,
+        partition_count: int,
+        topics: list[str],
+        retry_topic: str = None, # 重试 topic
+        dlq_topic: str = None, # 死信队列 topic
+        failure_strategy: FailureHandlingStrategy = None,
     ):
-        self.partition_count = partition_count
-        
         self.event_emitter = event_emitter
         self.consumer = consumer
+
+        self.partition_count = partition_count
+        self.topics = topics
+        self.retry_topic = retry_topic
+        self.dlq_topic = dlq_topic
+        self.failure_strategy = failure_strategy or NoopFailureStrategy()
 
         # 任务集合，先这样搞，后期如果需要，可以考虑使用basana项目的basana/core/helpers.py里面的TaskPool
         self._tasks: set[asyncio.Task] = set()
@@ -64,22 +61,20 @@ class EventDispatcher:
 
         self._stop_event = asyncio.Event()
 
-        # EventDispatcher的子类必须实现_handler_message或_batch_handler_message方法
-        self._validate_handlers()
+    def _validate_config(self):
+        if not self.topics:
+            raise ValueError("topics must not be empty")
 
-    # def __init_subclass__(cls, **kwargs):
-    #     # 约束子类为NORMAL模式时，必须设置retry_topic、dlq_topic属性
-    #     # 约束子类为STRICT_ORDER模式时，必须设置dlq_topic属性，严格顺序消费模式不放入重试队列
-    #     super().__init_subclass__(**kwargs)
-    #     if cls.consume_mode == ConsumeMode.STRICT_ORDER:
-    #         raise TypeError(f"STRICT_ORDER mode is not supported yet")
-    #     elif cls.consume_mode == ConsumeMode.NORMAL:
-    #         if not cls.retry_topic:
-    #             raise TypeError(f"{cls.__name__} must define retry_topic when using NORMAL mode")
-    #         if not cls.dlq_topic:
-    #             raise TypeError(f"{cls.__name__} must define dlq_topic when using NORMAL mode")
-    #     else:
-    #         raise ValueError(f"consume_mode: {cls.consume_mode} is not supported")
+        if self.failure_strategy is None:
+            raise ValueError("failure_strategy must be configured")
+
+        actions = self.failure_strategy.actions
+        if FailureAction.RETRY in actions:
+            if not self.retry_topic:
+                raise ValueError("RETRY is enabled but retry_topic is not configured")
+        if FailureAction.DLQ in actions:
+            if not self.dlq_topic:
+                raise ValueError("DLQ is enabled but dlq_topic is not configured")
 
     def _validate_handlers(self):
         # 检查子类是否实现了_batch_handler_message方法
@@ -152,12 +147,15 @@ class EventDispatcher:
         """
         pass
 
-
     async def run(self):
         """
         主消费循环
         使用了设计模式中的「模版模式」
         """
+
+        self._validate_config()
+        # EventDispatcher的子类必须实现_handler_message或_batch_handler_message方法
+        self._validate_handlers()
 
         # 配置consumer
         self.configure_consumer()
@@ -204,20 +202,24 @@ class EventDispatcher:
             await self.before_batch_handler(msgs)
             results = await self._batch_handler_message(msgs)
             await self.after_batch_handler(results)
-            # if self.consume_mode == ConsumeMode.NORMAL:
-            await self._process_normal_results(results)
+            await self._process_results(results)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("dispatch failed")
 
-    async def _process_normal_results(self, results: list[ConsumeResult]):
-        """
-        normal mode:
-        - fail直接retry topic
-        - 原topic offset直接commit
-        - retry count存在消息里面的meta里面
-        """
+    async def _execute_failure_action(self, result: ConsumeResult, decision: FailureDecision):
+        if decision.action == FailureAction.ACK:
+            return
+        if decision.action == FailureAction.RETRY:
+            await self._send_to_retry(result.msg, result.error, decision.retry_count)
+            return
+        if decision.action == FailureAction.DLQ:
+            await self._send_to_dlq(result.msg, result.error, decision.retry_count)
+            return
+        raise ValueError(f"Unsupported failure action: {decision.action}")
+
+    async def _process_results(self, results: list[ConsumeResult]):
         commit_msgs = []
         for result in results:
             msg = result.msg
@@ -225,12 +227,15 @@ class EventDispatcher:
                 commit_msgs.append(msg)
                 continue
 
-            retry_count = self._get_normal_retry_count(msg) + 1
-            if retry_count >= self.max_retries:
-                await self._send_to_dlq(msg, result.error, retry_count)
-            else:
-                await self._send_to_retry(msg, result.error, retry_count)
-            commit_msgs.append(msg)
+            context = FailureContext(
+                msg=result.msg,
+                error=result.error,
+                retry_count=self._get_retry_count(result.msg),
+            )
+            decision = await self.failure_strategy.decide(context)
+            await self._execute_failure_action(result, decision)
+            if decision.action in {FailureAction.ACK, FailureAction.RETRY, FailureAction.DLQ}:
+                commit_msgs.append(result.msg)
 
         if commit_msgs:
             await self.consumer.store_offsets(commit_msgs)
@@ -319,7 +324,7 @@ class EventDispatcher:
         return payload
 
     @staticmethod
-    def _get_normal_retry_count(msg: ConsumerMessage) -> int:
+    def _get_retry_count(msg: ConsumerMessage) -> int:
         payload = msg.decoded_payload or {}
         meta = payload.get("meta", {})
         return int(meta.get("retry_count", 0))

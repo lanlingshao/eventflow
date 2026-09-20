@@ -118,7 +118,7 @@ class NormalModeDispatcherTests(unittest.IsolatedAsyncioTestCase):
         succeeded = make_message(offset=10)
         failed = make_message(offset=11)
 
-        await dispatcher._process_normal_results(
+        await dispatcher._process_results(
             [
                 ConsumeResult(msg=succeeded, success=True),
                 ConsumeResult(msg=failed, success=False, error=ValueError("invalid order")),
@@ -146,7 +146,7 @@ class NormalModeDispatcherTests(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        await dispatcher._process_normal_results(
+        await dispatcher._process_results(
             [ConsumeResult(msg=retry_message, success=False, error=RuntimeError("failed again"))]
         )
 

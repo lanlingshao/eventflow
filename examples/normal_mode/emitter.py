@@ -32,15 +32,14 @@ class Event:
 
 async def run_emitter():
     loop = asyncio.get_running_loop()
+    current_task = asyncio.current_task()
 
     producer = KafkaProducer(KafkaProducerConf)
     emitter = EventEmitter(producer)
 
-    stop_event = asyncio.Event()
-
     def _on_stop_signal(sig: signal.Signals):
         logger.debug(f"Received signal: {sig.name}")
-        stop_event.set()
+        current_task.cancel()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(
@@ -52,7 +51,7 @@ async def run_emitter():
 
     index = 1
     try:
-        while not stop_event.is_set():
+        while True:
             event = Event(
                 event_id=index,
             )
@@ -61,12 +60,14 @@ async def run_emitter():
                 partition=partition
             )
             await emitter.emit(TOPIC, event.to_bytes(), message_config)
-            await asyncio.sleep(5)
+            await asyncio.sleep(3)
             index += 1
     except asyncio.CancelledError:
-        await emitter.stop()
+        logger.info("Emitter cancelled")
     finally:
+        logger.info("Stopping emitter...")
         await emitter.stop()
+        logger.info("Emitter stopped.")
 
 
 if __name__ == '__main__':
