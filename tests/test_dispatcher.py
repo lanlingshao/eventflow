@@ -55,12 +55,12 @@ class RecordingConsumer:
         self.stop_count += 1
 
 
-class NormalDispatcher(EventDispatcher):
+class Dispatcher(EventDispatcher):
     async def _batch_handler_message(self, msgs):
         return self.results
 
 
-class KeyedNormalDispatcher(NormalDispatcher):
+class KeyedDispatcher(Dispatcher):
     def get_partition_key(self, payload, msg):
         return payload["customer_id"]
 
@@ -87,7 +87,7 @@ def make_message(
 class NormalModeDispatcherTests(unittest.IsolatedAsyncioTestCase):
     def make_dispatcher(
         self,
-        dispatcher_type=NormalDispatcher,
+        dispatcher_type=Dispatcher,
         failure_strategy=None,
         retry_topic="orders.retry",
         dlq_topic="orders.dlq",
@@ -183,7 +183,7 @@ class NormalModeDispatcherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_partition_key_overrides_source_partition_for_retry_routing(self):
         dispatcher = self.make_dispatcher(
-            KeyedNormalDispatcher,
+            KeyedDispatcher,
             failure_strategy=MaxRetryStrategy(),
         )
         message = make_message(partition=6)
