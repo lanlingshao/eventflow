@@ -2,19 +2,19 @@
 
 [English](README.md)
 
-`eventflow` 是一个面向 Python 与 Kafka 的可扩展异步事件分发框架。它将事件生产、Broker 消费、批量处理、重试投递和死信处理拆分开，使应用可以专注于业务处理逻辑。
+`eventflow` 是一个面向 Python 与 Kafka 的可扩展异步事件分发框架。它将事件生产、Broker 消费、批量处理和失败处理拆分开，使应用可以专注于业务处理逻辑。
 
-> 当前框架仅支持**普通消费模式**。消息处理失败后，消息投递到重试主题或死信主题，随后会提交原始 offset。因此，消费失败后不保证严格顺序。
+> 当前框架仅支持**普通消费模式**。`FailureHandlingStrategy` 决定失败消息是确认、投递到重试主题，还是投递到死信主题。相应操作完成后会提交原始 offset，因此消费失败后不保证严格顺序。
 
 ## 功能
 
 - 基于 `confluent-kafka` 的异步 Kafka 生产者和消费者。
 - 通过单个 dispatcher 扩展点批量处理消息。
-- 重试消息保留来源 topic、分区、offset、时间戳、错误和重试次数。
-- 达到重试上限后自动投递死信队列。
+- 可插拔的 `FailureHandlingStrategy`，可按消息决定失败处理动作。
+- 内置仅确认及限定次数重试/死信策略。
+- 重试和死信消息保留来源 topic、分区、offset、时间戳、错误和重试次数。
 - 同一批次中成功和失败的消息分别处理。
 - 支持消费者再均衡回调和优雅停机。
-- 提供用于自定义流程的本地内存重试计数器。
 
 ## 环境要求
 
@@ -65,17 +65,13 @@ pip install confluent-kafka==2.13.0 mmh3==5.2.0
 
 ## 编写 Dispatcher
 
-继承 `EventDispatcher`，声明输入、重试和死信 topic，并实现 `_batch_handler_message`。处理器必须为每个输入消息返回一个 `ConsumeResult`。
+继承 `EventDispatcher` 并实现 `_batch_handler_message`。处理器必须为每个输入消息返回一个 `ConsumeResult`。在创建 dispatcher 时配置输入与失败路由 topic，以及失败处理策略。
 
 ```python
 from eventflow.dispatcher.dispatcher import ConsumeResult, EventDispatcher
 
 
 class OrderDispatcher(EventDispatcher):
-    topics = ["orders"]
-    retry_topic = "orders.retry"
-    dlq_topic = "orders.dlq"
-
     async def _batch_handler_message(self, messages):
         results = []
         for message in messages:
@@ -93,6 +89,7 @@ class OrderDispatcher(EventDispatcher):
 ```python
 from eventflow.broker.kafka.consumer import KafkaConsumer
 from eventflow.broker.kafka.producer import KafkaProducer
+from eventflow.dispatcher.failure import MaxRetryStrategy
 from eventflow.emitter.emitter import EventEmitter
 
 producer = KafkaProducer(producer_config)
@@ -103,17 +100,41 @@ dispatcher = OrderDispatcher(
     partition_count=24,
     event_emitter=emitter,
     consumer=consumer,
+    topics=["orders"],
+    retry_topic="orders.retry",
+    dlq_topic="orders.dlq",
+    failure_strategy=MaxRetryStrategy(max_retries=3),
 )
 await dispatcher.run()
 ```
 
 `partition_count` 必须与 dispatcher 使用的 Kafka topic 分区数一致。
 
-## 消息格式与重试
+## 消费失败处理
+
+每个失败的 `ConsumeResult` 都会由 `failure_strategy` 接收对应的 `FailureContext`，并返回包含以下动作之一的 `FailureDecision`：
+
+- `ACK`：确认并提交失败的源消息，不再发布新消息。
+- `RETRY`：发布重试信封消息，然后提交失败的源消息。
+- `DLQ`：发布死信信封消息，然后提交失败的源消息。
+
+默认策略是始终返回 `ACK` 的 `NoopFailureStrategy`。如需重试并在达到上限后投递死信队列，可使用 `MaxRetryStrategy`：
+
+```python
+from eventflow.dispatcher.failure import MaxRetryStrategy
+
+failure_strategy = MaxRetryStrategy(max_retries=3)
+```
+
+该策略会在消息当前重试次数小于 `max_retries` 时投递重试 topic，并将次数加一；当前次数达到上限后，则投递 DLQ，并将次数加一。
+
+策略通过 `actions` 声明其可能返回的动作。dispatcher 在启动前校验配置：可能返回 `RETRY` 的策略必须配置 `retry_topic`，可能返回 `DLQ` 的策略必须配置 `dlq_topic`。如有其他处理流程，可自行实现 `FailureHandlingStrategy`。
+
+## 重试与死信消息格式
 
 业务消息使用 JSON payload。`KafkaConsumer` 会通过 `json.loads` 解码每条消息体，因此非 JSON 消息会在进入批量处理器之前失败。
 
-当处理器返回失败结果时，dispatcher 会将下列信封消息投递到重试 topic，直到重试次数达到 `max_retries`（默认值：`3`）：
+当策略选择 `RETRY` 或 `DLQ` 时，dispatcher 会将下列信封消息投递到对应 topic：
 
 ```json
 {
@@ -133,7 +154,7 @@ await dispatcher.run()
 
 重试 topic 会自动加入消费者订阅。`_get_business_payload(message)` 会解开该信封，因此同一个处理器可以处理原始消息和重试消息。
 
-达到重试上限时，同样的信封会被发送到 `dlq_topic`。每个处理结果完成后，原始消息的 offset 会被存储并提交。
+只有在选定的失败处理动作完成后，原始消息的 offset 才会被存储并提交。
 
 ## 分区路由
 
@@ -141,7 +162,7 @@ await dispatcher.run()
 
 ```python
 class OrderDispatcher(EventDispatcher):
-    # 此处省略 topics、retry_topic、dlq_topic 和 handler
+    # 此处省略 handler
     def get_partition_key(self, payload, message):
         return payload["customer_id"]
 ```

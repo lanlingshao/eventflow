@@ -2,19 +2,19 @@
 
 [中文文档](README_CN.md)
 
-`eventflow` is an extensible, asynchronous event-dispatching framework for Python and Kafka. It separates event production, broker consumption, batch handling, retry delivery, and dead-letter handling so applications can focus on their business handlers.
+`eventflow` is an extensible, asynchronous event-dispatching framework for Python and Kafka. It separates event production, broker consumption, batch handling, and failure handling so applications can focus on their business handlers.
 
-> The framework currently supports **normal consumption mode** only. When a message fails, the original offset is committed after the message is delivered to a retry topic or dead-letter topic. Therefore, it does not provide strict in-order processing after a failure.
+> The framework currently supports **normal consumption mode** only. A `FailureHandlingStrategy` determines whether a failed message is acknowledged, sent to a retry topic, or sent to a dead-letter topic. When that action completes, the original offset is committed; therefore, failures do not preserve strict processing order.
 
 ## Features
 
 - Async Kafka producer and consumer built on `confluent-kafka`.
 - Batch message handling through a single dispatcher extension point.
-- Retry envelopes that retain the source topic, partition, offset, timestamp, error, and retry count.
-- Dead-letter routing after the configured retry limit.
+- Pluggable `FailureHandlingStrategy` implementations for per-message failure decisions.
+- Built-in acknowledge-only and bounded-retry/dead-letter strategies.
+- Retry and dead-letter envelopes that retain the source topic, partition, offset, timestamp, error, and retry count.
 - Per-message result handling: successful and failed records in the same batch are handled independently.
 - Consumer rebalance hooks and graceful shutdown support.
-- A local in-memory retry counter implementation for custom workflows.
 
 ## Requirements
 
@@ -65,17 +65,13 @@ The sample emitter publishes JSON events. The sample dispatcher deliberately fai
 
 ## Implementing a dispatcher
 
-Subclass `EventDispatcher`, declare the input, retry, and dead-letter topics, and implement `_batch_handler_message`. The handler must return one `ConsumeResult` for every input message.
+Subclass `EventDispatcher` and implement `_batch_handler_message`. The handler must return one `ConsumeResult` for every input message. Configure input and failure-routing topics, plus the failure strategy, when creating the dispatcher.
 
 ```python
 from eventflow.dispatcher.dispatcher import ConsumeResult, EventDispatcher
 
 
 class OrderDispatcher(EventDispatcher):
-    topics = ["orders"]
-    retry_topic = "orders.retry"
-    dlq_topic = "orders.dlq"
-
     async def _batch_handler_message(self, messages):
         results = []
         for message in messages:
@@ -93,6 +89,7 @@ Create the runtime components and run the dispatcher:
 ```python
 from eventflow.broker.kafka.consumer import KafkaConsumer
 from eventflow.broker.kafka.producer import KafkaProducer
+from eventflow.dispatcher.failure import MaxRetryStrategy
 from eventflow.emitter.emitter import EventEmitter
 
 producer = KafkaProducer(producer_config)
@@ -103,17 +100,41 @@ dispatcher = OrderDispatcher(
     partition_count=24,
     event_emitter=emitter,
     consumer=consumer,
+    topics=["orders"],
+    retry_topic="orders.retry",
+    dlq_topic="orders.dlq",
+    failure_strategy=MaxRetryStrategy(max_retries=3),
 )
 await dispatcher.run()
 ```
 
 `partition_count` must match the Kafka topic partition count used for the dispatcher topics.
 
-## Message format and retries
+## Failure handling
+
+`failure_strategy` receives a `FailureContext` for every failed `ConsumeResult`. It returns a `FailureDecision` with one of these actions:
+
+- `ACK`: acknowledge and commit the failed source message without publishing another message.
+- `RETRY`: publish a retry envelope and then commit the failed source message.
+- `DLQ`: publish a dead-letter envelope and then commit the failed source message.
+
+`NoopFailureStrategy` is the default and always returns `ACK`. Use `MaxRetryStrategy` to retry messages and route them to a dead-letter topic after the limit:
+
+```python
+from eventflow.dispatcher.failure import MaxRetryStrategy
+
+failure_strategy = MaxRetryStrategy(max_retries=3)
+```
+
+With this strategy, a message whose current retry count is lower than `max_retries` is sent to the retry topic with its count incremented. Once its current count reaches the limit, it is sent to the DLQ with the count incremented.
+
+Strategies declare the actions they may return through `actions`. Dispatcher configuration is validated before startup: a strategy that can return `RETRY` requires `retry_topic`; one that can return `DLQ` requires `dlq_topic`. Implement `FailureHandlingStrategy` to define custom policies.
+
+## Message format for retry and DLQ
 
 Application messages are JSON payloads. `KafkaConsumer` decodes each message body using `json.loads`, so a non-JSON payload will fail before it reaches the batch handler.
 
-When a handler reports a failure, the dispatcher sends this envelope to the retry topic until the retry count reaches `max_retries` (default: `3`):
+When a strategy chooses `RETRY` or `DLQ`, the dispatcher publishes this envelope to the corresponding topic:
 
 ```json
 {
@@ -133,7 +154,7 @@ When a handler reports a failure, the dispatcher sends this envelope to the retr
 
 The retry topic is automatically included in the consumer subscription. `_get_business_payload(message)` unwraps this envelope, allowing the same handler to process original and retried messages.
 
-At the retry limit, the same envelope is sent to `dlq_topic`. The original source offset is stored and committed after each result has been processed.
+The original source offset is stored and committed only after the selected failure action has completed.
 
 ## Partition routing
 
@@ -141,7 +162,7 @@ By default, retry and dead-letter messages use the source message's partition. O
 
 ```python
 class OrderDispatcher(EventDispatcher):
-    # topics, retry_topic, dlq_topic, and handler omitted
+    # Handler omitted
     def get_partition_key(self, payload, message):
         return payload["customer_id"]
 ```
