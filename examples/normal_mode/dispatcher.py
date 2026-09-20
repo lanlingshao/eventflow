@@ -4,8 +4,7 @@ import logging
 from eventflow.broker.kafka.consumer import KafkaConsumer
 from eventflow.broker.kafka.producer import KafkaProducer
 from eventflow.dispatcher.dispatcher import EventDispatcher, ConsumeResult
-from eventflow.dispatcher.failure import FailureHandlingStrategy, FailureContext, FailureDecision, FailureAction, \
-    MaxRetryStrategy
+from eventflow.dispatcher.failure import  MaxRetryStrategy
 from eventflow.emitter.emitter import EventEmitter
 from examples.normal_mode.conf import KafkaProducerConf, KafkaConsumerConf
 from examples.normal_mode.constant import TOPIC, DLQ_TOPIC, RETRY_TOPIC, PARTITION_COUNT

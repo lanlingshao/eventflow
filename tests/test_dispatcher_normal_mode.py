@@ -1,9 +1,10 @@
 import json
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 from eventflow.dispatcher.consumer import ConsumerMessage
 from eventflow.dispatcher.dispatcher import ConsumeResult, EventDispatcher
+from eventflow.dispatcher.failure import MaxRetryStrategy
 from eventflow.emitter.emitter import EventEmitter
 from eventflow.util.partition import get_partition
 
@@ -55,10 +56,6 @@ class RecordingConsumer:
 
 
 class NormalDispatcher(EventDispatcher):
-    topics = ["orders"]
-    retry_topic = "orders.retry"
-    dlq_topic = "orders.dlq"
-
     async def _batch_handler_message(self, msgs):
         return self.results
 
@@ -88,19 +85,29 @@ def make_message(
 
 
 class NormalModeDispatcherTests(unittest.IsolatedAsyncioTestCase):
-    def make_dispatcher(self, dispatcher_type=NormalDispatcher):
+    def make_dispatcher(
+        self,
+        dispatcher_type=NormalDispatcher,
+        failure_strategy=None,
+        retry_topic="orders.retry",
+        dlq_topic="orders.dlq",
+    ):
         self.producer = RecordingProducer()
         self.consumer = RecordingConsumer()
         dispatcher = dispatcher_type(
             partition_count=8,
             event_emitter=EventEmitter(self.producer),
             consumer=self.consumer,
+            topics=["orders"],
+            retry_topic=retry_topic,
+            dlq_topic=dlq_topic,
+            failure_strategy=failure_strategy,
         )
         dispatcher.results = []
         return dispatcher
 
     async def test_configure_consumer_adds_retry_topic_and_callbacks(self):
-        dispatcher = self.make_dispatcher()
+        dispatcher = self.make_dispatcher(failure_strategy=MaxRetryStrategy())
         on_assign, on_revoke, on_lost = Mock(), Mock(), Mock()
         dispatcher.on_assign_callback = Mock(return_value=on_assign)
         dispatcher.on_revoke_callback = Mock(return_value=on_revoke)
@@ -113,7 +120,7 @@ class NormalModeDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.consumer.revoked_callback, on_revoke)
         self.assertIs(self.consumer.lost_callback, on_lost)
 
-    async def test_success_and_failure_are_committed_and_failure_goes_to_retry(self):
+    async def test_noop_strategy_acknowledges_success_and_failure_without_republishing(self):
         dispatcher = self.make_dispatcher()
         succeeded = make_message(offset=10)
         failed = make_message(offset=11)
@@ -127,6 +134,18 @@ class NormalModeDispatcherTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.consumer.stored_messages, [[succeeded, failed]])
         self.assertEqual(self.consumer.commit_count, 1)
+        self.assertEqual(self.producer.messages, [])
+
+    async def test_max_retry_strategy_sends_failure_to_retry_and_commits_source_offset(self):
+        dispatcher = self.make_dispatcher(failure_strategy=MaxRetryStrategy(max_retries=3))
+        failed = make_message(offset=11)
+
+        await dispatcher._process_results(
+            [ConsumeResult(msg=failed, success=False, error=ValueError("invalid order"))]
+        )
+
+        self.assertEqual(self.consumer.stored_messages, [[failed]])
+        self.assertEqual(self.consumer.commit_count, 1)
         self.assertEqual(len(self.producer.messages), 1)
         retry = self.producer.messages[0]
         self.assertEqual(retry.topic, "orders.retry")
@@ -138,10 +157,13 @@ class NormalModeDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retry_payload["meta"]["error"], "ValueError('invalid order')")
 
     async def test_message_at_retry_limit_is_sent_to_dlq(self):
-        dispatcher = self.make_dispatcher()
+        max_retries = 3
+        dispatcher = self.make_dispatcher(
+            failure_strategy=MaxRetryStrategy(max_retries=max_retries)
+        )
         retry_message = make_message(
             payload={
-                "meta": {"retry_count": dispatcher.max_retries - 1},
+                "meta": {"retry_count": max_retries},
                 "payload": {"order_id": "o-2", "customer_id": "c-2"},
             }
         )
@@ -155,12 +177,15 @@ class NormalModeDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dlq.config.partition, retry_message.partition)
         dlq_payload = json.loads(dlq.payload)
         self.assertEqual(dlq_payload["payload"], {"order_id": "o-2", "customer_id": "c-2"})
-        self.assertEqual(dlq_payload["meta"]["retry_count"], dispatcher.max_retries)
+        self.assertEqual(dlq_payload["meta"]["retry_count"], max_retries + 1)
         self.assertEqual(self.consumer.stored_messages, [[retry_message]])
         self.assertEqual(self.consumer.commit_count, 1)
 
     async def test_partition_key_overrides_source_partition_for_retry_routing(self):
-        dispatcher = self.make_dispatcher(KeyedNormalDispatcher)
+        dispatcher = self.make_dispatcher(
+            KeyedNormalDispatcher,
+            failure_strategy=MaxRetryStrategy(),
+        )
         message = make_message(partition=6)
 
         await dispatcher._send_to_retry(message, ValueError("bad"), retry_count=1)
